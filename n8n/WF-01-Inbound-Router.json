@@ -1,0 +1,576 @@
+{
+  "name": "WF-01 Inbound Router - Warung Modern",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "warung-whatsapp-inbound",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "83ba36a0-e72d-4d40-8c9a-6232c590e6d4",
+      "name": "Evolution Inbound Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "0ba55f7a-06ad-4e06-8921-bf27ed8e12a8"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const input = $input.first()?.json ?? {};\nconst body = input.body && typeof input.body === 'object' ? input.body : input;\nconst event = body.event;\n\nfunction ignored(reason, extra = {}) {\n  return [{ json: { accepted: false, reason, event: event ?? null, ...extra } }];\n}\n\nif (event !== 'messages.upsert') return ignored('unsupported_event');\n\nconst data = body.data ?? {};\nconst key = data.key ?? {};\nif (key.fromMe === true) return ignored('outgoing_message');\n\nconst remoteJid = typeof key.remoteJid === 'string' ? key.remoteJid : '';\nif (remoteJid.endsWith('@g.us')) return ignored('group_message');\n\nfunction normalizePhone(jid) {\n  if (typeof jid !== 'string' || !jid.includes('@')) return null;\n  const [localPart, domain] = jid.split('@', 2);\n  if (!['s.whatsapp.net', 'c.us'].includes(domain)) return null;\n  let digits = localPart.replace(/\\D/g, '');\n  if (digits.startsWith('00')) digits = digits.slice(2);\n  if (digits.startsWith('0')) digits = `62${digits.slice(1)}`;\n  else if (digits.startsWith('8')) digits = `62${digits}`;\n  if (!digits.startsWith('62') || digits.length < 10 || digits.length > 15) return null;\n  return digits;\n}\n\nlet phone = normalizePhone(remoteJid);\nif (remoteJid.endsWith('@lid')) {\n  phone = normalizePhone(key.remoteJidAlt);\n  if (!phone) return ignored('lid_without_resolvable_phone', { manual_review: true });\n}\nif (!phone) return ignored('unusable_sender_jid', { manual_review: true });\n\nconst message = data.message ?? {};\nconst location = message.locationMessage ?? message.liveLocationMessage ?? null;\nconst image = message.imageMessage ?? null;\nconst mediaBase64 = typeof message.base64 === 'string' ? message.base64 : null;\nconst mediaMimeType = image?.mimetype ?? message.documentMessage?.mimetype ?? null;\nconst mediaFileName = image?.fileName ?? message.documentMessage?.fileName ?? null;\nconst text = message.conversation\n  ?? message.extendedTextMessage?.text\n  ?? image?.caption\n  ?? '';\nconst messageType = String(data.messageType ?? (location ? 'locationMessage' : image ? 'imageMessage' : 'unknown'));\nconst isText = typeof text === 'string' && text.trim().length > 0;\nconst isLocation = Boolean(location);\nconst isImage = Boolean(image);\n\nif (!isText && !isLocation && !isImage) return ignored('unsupported_message_type', { message_type: messageType });\nif (typeof key.id !== 'string' || key.id.length === 0) return ignored('missing_message_id');\n\nconst timestamp = Number(data.messageTimestamp);\nconst payload = {\n  instance: typeof body.instance === 'string' ? body.instance : null,\n  timestamp: Number.isFinite(timestamp) ? timestamp : null,\n  text: isText ? text : null,\n  location: isLocation ? {\n    latitude: location.degreesLatitude ?? null,\n    longitude: location.degreesLongitude ?? null\n  } : null\n};\n\nreturn [{\n  json: {\n    accepted: true,\n    message_id: key.id,\n    phone,\n    message_type: messageType,\n    text: isText ? text : null,\n    is_text: isText,\n    is_location: isLocation,\n    is_image: isImage,\n    media_base64: isImage ? mediaBase64 : null,\n    media_mimetype: isImage ? mediaMimeType : null,\n    media_file_name: isImage ? mediaFileName : null,\n    timestamp: payload.timestamp,\n    instance: payload.instance,\n    location: payload.location,\n    payload\n  }\n}];"
+      },
+      "id": "9e1678a1-79da-4ddf-813c-20e1f80cc265",
+      "name": "Normalize and Filter Inbound",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c4d0df60-3a92-48a1-9e58-8024ef2652a7",
+              "leftValue": "={{ $json.accepted }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "922de9f2-f120-440e-890b-926a58030b6d",
+      "name": "Is Supported Inbound?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "https://admin.aspsr.xyz/api/bot/inbound/dedupe",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { message_id: $('Normalize and Filter Inbound').first().json.message_id, phone: $('Normalize and Filter Inbound').first().json.phone, type: $('Normalize and Filter Inbound').first().json.message_type, payload: $('Normalize and Filter Inbound').first().json.payload } }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "d5ea071e-7e63-40ab-81c5-ae8d1921f5fd",
+      "name": "Laravel - Deduplicate Inbound",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        720,
+        0
+      ],
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "670e521a-cd84-4ff7-bfe7-8da0d0c125c0",
+              "leftValue": "={{ $json.data.duplicate }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "dd90f13d-53c5-498a-b7d1-1ba54a48eb99",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "method": "POST",
+        "url": "https://admin.aspsr.xyz/api/bot/customers/identify",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { phone: $('Normalize and Filter Inbound').first().json.phone } }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "93fe84e4-6f20-422e-8d7e-493cdbcfb38d",
+      "name": "Laravel - Identify Customer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        0
+      ],
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "url": "={{ 'https://admin.aspsr.xyz/api/bot/sessions/' + encodeURIComponent($('Normalize and Filter Inbound').first().json.phone) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "16fc0739-7aa9-48f6-b30c-8a47eb6ac001",
+      "name": "Laravel - Get Conversation Session",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1440,
+        0
+      ],
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const inbound = $('Normalize and Filter Inbound').first().json;\nconst response = $input.first()?.json ?? {};\nconst state = response.data?.state ?? 'IDLE';\nlet route;\n\nif (inbound.is_location || state === 'AWAITING_LOCATION') route = 'WF-03';\nelse if (inbound.is_image || state === 'AWAITING_PAYMENT') route = 'WF-05';\nelse if (inbound.is_text && state === 'AWAITING_CONFIRMATION') route = 'WF-04';\nelse if (inbound.is_text) route = 'WF-02';\nelse route = 'WF-07';\n\nreturn [{\n  json: {\n    dispatch_status: 'classified_handler_not_connected',\n    dispatch_target: route,\n    phone: inbound.phone,\n    message_id: inbound.message_id,\n    message_type: inbound.message_type,\n    text: inbound.text,\n    timestamp: inbound.timestamp,\n    instance: inbound.instance,\n                    location: inbound.location,\n    is_text: inbound.is_text,\n    is_location: inbound.is_location,\n    is_image: inbound.is_image,\n    media_base64: inbound.media_base64,\n    media_mimetype: inbound.media_mimetype,\n    media_file_name: inbound.media_file_name,\n    session_state: state,\n    session_context: response.data?.context ?? {}\n  }\n}];"
+      },
+      "id": "eefc8641-f25c-42ad-9cc0-f6b4d3a9e5cc",
+      "name": "Classify Handler Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.dispatch_target }}",
+                    "rightValue": "WF-03",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "bde28884-e1c1-4c6c-a742-3b9d8a263c39"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "WF-03"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.dispatch_target }}",
+                    "rightValue": "WF-05",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "3566537c-fb75-40d0-817b-b8e98da06c11"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "WF-05"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.dispatch_target }}",
+                    "rightValue": "WF-04",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "2cd9e7d8-f39d-45be-b14d-30032d452621"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "WF-04"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.dispatch_target }}",
+                    "rightValue": "WF-02",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "c8092ce4-29c6-484a-b8d5-eebf3873c45c"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "WF-02"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "id": "bf735261-0637-4cd8-89fe-fd10dbfa6bb7",
+      "name": "Switch to Handler",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1920,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return $input.all().map(item => ({ json: { ...item.json, dispatch_status: 'handler_not_connected' } }));"
+      },
+      "id": "cd5c04b4-45f2-453f-9179-ab1310e2f2f0",
+      "name": "WF-03 Location - Connect Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        -180
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return $input.all().map(item => ({ json: { ...item.json, dispatch_status: 'handler_not_connected' } }));"
+      },
+      "id": "4412a273-926c-42dc-9f6e-820bd0e2ee45",
+      "name": "WF-05 Payment Proof - Connect Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return $input.all().map(item => ({ json: { ...item.json, dispatch_status: 'handler_not_connected' } }));"
+      },
+      "id": "063f0515-04f1-4965-bbad-ea8f2045f93e",
+      "name": "WF-04 Checkout - Connect Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return $input.all().map(item => ({ json: { ...item.json, dispatch_status: 'handler_not_connected' } }));"
+      },
+      "id": "36905449-20b0-4bc9-aa6c-a6788a8392bf",
+      "name": "WF-02 Shopping - Connect Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return $input.all().map(item => ({ json: { ...item.json, dispatch_status: 'handler_not_connected' } }));"
+      },
+      "id": "20614d20-5df4-4e84-8d90-9e3f8a541679",
+      "name": "WF-07 Help - Connect Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        360
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return $input.all().map(item => ({ json: { ...item.json, dispatch_status: 'duplicate_ignored' } }));"
+      },
+      "id": "c728f5ec-48c7-4b7f-935e-40f491512e09",
+      "name": "Stop Duplicate Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "return $input.all().map(item => ({ json: { ...item.json, dispatch_status: 'ignored_or_manual_review' } }));"
+      },
+      "id": "8c31f21a-aa50-429f-838c-3af777e2d5fc",
+      "name": "Stop Unsupported or Manual Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        220
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Evolution Inbound Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize and Filter Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize and Filter Inbound": {
+      "main": [
+        [
+          {
+            "node": "Is Supported Inbound?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Supported Inbound?": {
+      "main": [
+        [
+          {
+            "node": "Laravel - Deduplicate Inbound",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop Unsupported or Manual Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Laravel - Deduplicate Inbound": {
+      "main": [
+        [
+          {
+            "node": "Is Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Stop Duplicate Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Laravel - Identify Customer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Laravel - Identify Customer": {
+      "main": [
+        [
+          {
+            "node": "Laravel - Get Conversation Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Laravel - Get Conversation Session": {
+      "main": [
+        [
+          {
+            "node": "Classify Handler Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Handler Route": {
+      "main": [
+        [
+          {
+            "node": "Switch to Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch to Handler": {
+      "main": [
+        [
+          {
+            "node": "WF-03 Location - Connect Handler",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WF-05 Payment Proof - Connect Handler",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WF-04 Checkout - Connect Handler",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WF-02 Shopping - Connect Handler",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WF-07 Help - Connect Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "470f4f40-9557-4598-9701-c3310c2db3c4",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
